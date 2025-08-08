@@ -1,0 +1,203 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>r/place Lite (1000×1000)</title>
+<style>
+  html,body{margin:0;height:100%;overflow:hidden;background:#111;color:#eee;font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial}
+  #wrap{position:fixed;inset:0;display:flex;flex-direction:column}
+  #top{display:flex;gap:8px;align-items:center;padding:8px;background:#1b1b1b}
+  .chip{border:0;border-radius:999px;padding:6px 10px;background:#2a2a2a;color:#eee}
+  .chip.active{outline:2px solid #fff}
+  #cool{font-variant-numeric:tabular-nums}
+  #stage{flex:1;position:relative;background:#000;touch-action:none}
+  canvas{position:absolute;left:0;top:0;image-rendering: pixelated;image-rendering: crisp-edges;}
+  #hint{position:absolute;left:8px;bottom:8px;background:rgba(0,0,0,.5);padding:6px 8px;border-radius:6px;font-size:12px}
+</style>
+</head>
+<body>
+<div id="wrap">
+  <div id="top">
+    <span>🎨 Farbe:</span>
+    <div id="palette"></div>
+    <button id="resetView" class="chip">Zentrieren</button>
+    <span id="cool" style="margin-left:auto;">Abklingzeit: 0s</span>
+  </div>
+  <div id="stage">
+    <canvas id="canvas"></canvas>
+    <div id="hint">Zoomen: Pinch • Ziehen: 1 Finger • Pixel setzen: Tippen</div>
+  </div>
+</div>
+<script>
+(() => {
+  const canvas = document.getElementById('canvas');
+  const ctx = canvas.getContext('2d');
+  const stage = document.getElementById('stage');
+  const paletteDiv = document.getElementById('palette');
+  const coolEl = document.getElementById('cool');
+  let W=0,H=0, zoom=1, offsetX=0, offsetY=0, dragging=false, lastX=0, lastY=0, lastDist=0;
+  let CW=1000, CH=1000, PALETTE=[[0,0,0,255],[255,255,255,255]];
+  let imgData, imgBuf;
+  let colorIndex = 0;
+  let cooldownUntil = 0;
+
+  function resize(){
+    W = stage.clientWidth; H = stage.clientHeight;
+    canvas.width = W; canvas.height = H;
+    draw();
+  }
+  new ResizeObserver(resize).observe(stage);
+
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  const ws = new WebSocket(`${proto}://${location.host}/ws`);
+
+  ws.addEventListener('message', (ev) => {
+    if (typeof ev.data === 'string') {
+      const m = JSON.parse(ev.data);
+      if (m.t === 'init') {
+        CW = m.w; CH = m.h; PALETTE = m.palette;
+        setupBuffers();
+        centerView();
+      } else if (m.t === 'update') {
+        putPixel(m.x, m.y, m.c, true);
+      } else if (m.t === 'cooldown') {
+        const now = Date.now();
+        cooldownUntil = now + (m.remaining||0);
+      }
+    } else {
+      const fr = new FileReader();
+      fr.onload = () => {
+        const idxBuf = new Uint8Array(fr.result);
+        for (let y=0;y<CH;y++){
+          for (let x=0;x<CW;x++){
+            const idx = y*CW + x;
+            putPixel(x, y, idxBuf[idx], false);
+          }
+        }
+        draw();
+      };
+      fr.readAsArrayBuffer(ev.data);
+    }
+  });
+
+  function setupBuffers(){
+    imgData = ctx.createImageData(CW, CH);
+    imgBuf = imgData.data;
+    buildPaletteUI();
+  }
+
+  function buildPaletteUI(){
+    paletteDiv.innerHTML='';
+    PALETTE.forEach((c,i)=>{
+      const btn = document.createElement('button');
+      btn.className = 'chip' + (i===colorIndex ? ' active' : '');
+      btn.style.background = `rgba(${c[0]},${c[1]},${c[2]},1)`;
+      btn.onclick = () => {
+        document.querySelectorAll('#palette .chip').forEach(b=>b.classList.remove('active'));
+        btn.classList.add('active');
+        colorIndex = i;
+      };
+      paletteDiv.appendChild(btn);
+    });
+  }
+
+  function putPixel(x,y,c, redraw){
+    const p = (y*CW + x) * 4;
+    const col = PALETTE[c];
+    imgBuf[p+0] = col[0];
+    imgBuf[p+1] = col[1];
+    imgBuf[p+2] = col[2];
+    imgBuf[p+3] = 255;
+    if (redraw) draw();
+  }
+
+  function draw(){
+    if (!imgData) return;
+    const tmpCanvas = document.createElement('canvas');
+    tmpCanvas.width = CW; tmpCanvas.height = CH;
+    const tctx = tmpCanvas.getContext('2d');
+    tctx.putImageData(imgData, 0, 0);
+    ctx.imageSmoothingEnabled = false;
+    ctx.setTransform(1,0,0,1,0,0);
+    ctx.clearRect(0,0,W,H);
+    ctx.setTransform(zoom,0,0,zoom, offsetX, offsetY);
+    ctx.drawImage(tmpCanvas, 0, 0);
+    if (zoom >= 12){
+      ctx.setTransform(zoom,0,0,zoom, offsetX, offsetY);
+      ctx.strokeStyle = 'rgba(255,255,255,0.1)';
+      ctx.lineWidth = 1/zoom;
+      for(let x=0;x<=CW;x++) { ctx.beginPath(); ctx.moveTo(x,0); ctx.lineTo(x,CH); ctx.stroke(); }
+      for(let y=0;y<=CH;y++) { ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(CW,y); ctx.stroke(); }
+    }
+  }
+
+  function centerView(){
+    const zx = (W-20)/CW, zy=(H-20)/CH;
+    zoom = Math.min(zx,zy);
+    offsetX = (W - CW*zoom)/2;
+    offsetY = (H - CH*zoom)/2;
+    draw();
+  }
+  document.getElementById('resetView').onclick = centerView;
+
+  stage.addEventListener('mousedown', e=>{ dragging=true; lastX=e.clientX; lastY=e.clientY; });
+  window.addEventListener('mouseup', ()=> dragging=false);
+  window.addEventListener('mousemove', e=>{
+    if (!dragging) return;
+    offsetX += (e.clientX - lastX);
+    offsetY += (e.clientY - lastY);
+    lastX = e.clientX; lastY = e.clientY;
+    draw();
+  });
+
+  stage.addEventListener('wheel', e=>{
+    e.preventDefault();
+    const delta = Math.sign(e.deltaY);
+    const factor = delta>0 ? 0.9 : 1.1;
+    zoomAt(e.clientX, e.clientY, factor);
+  }, { passive:false });
+
+  function zoomAt(cx, cy, factor){
+    const wx = (cx - offsetX)/zoom;
+    const wy = (cy - offsetY)/zoom;
+    zoom *= factor;
+    zoom = Math.max(0.5, Math.min(80, zoom));
+    offsetX = cx - wx*zoom;
+    offsetY = cy - wy*zoom;
+    draw();
+  }
+
+  stage.addEventListener('click', e=>{ trySetPixel(e.clientX, e.clientY); });
+  stage.addEventListener('touchend', e=>{
+    if (e.changedTouches && e.changedTouches.length===1){
+      const t=e.changedTouches[0];
+      trySetPixel(t.clientX, t.clientY);
+    }
+  }, {passive:true});
+
+  function trySetPixel(cx, cy){
+    const now = Date.now();
+    const remain = cooldownUntil - now;
+    if (remain > 0){
+      coolEl.textContent = 'Abklingzeit: ' + (Math.ceil(remain/100)/10).toFixed(1) + 's';
+      return;
+    }
+    const x = Math.floor((cx - offsetX)/zoom);
+    const y = Math.floor((cy - offsetY)/zoom);
+    if (x<0 || x>=CW || y<0 || y>=CH) return;
+    ws.send(JSON.stringify({ t:'set', x, y, c: colorIndex }));
+    putPixel(x,y,colorIndex,true);
+    cooldownUntil = now + 800;
+    coolEl.textContent = 'Abklingzeit: 0s';
+  }
+
+  setInterval(()=>{
+    const now=Date.now();
+    const remain = cooldownUntil - now;
+    coolEl.textContent = 'Abklingzeit: ' + Math.max(0, Math.ceil(remain/100)/10).toFixed(1) + 's';
+  }, 100);
+})();
+</script>
+</body>
+</html>
